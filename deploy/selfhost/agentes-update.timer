@@ -1,0 +1,10 @@
+[Unit]
+Description=Check agentes.chat server releases every night
+
+[Timer]
+OnCalendar=*-*-* 04:00:00 America/Recife
+RandomizedDelaySec=15m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

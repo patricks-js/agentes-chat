@@ -1,0 +1,8 @@
+[Unit]
+Description=Update agentes.chat to the latest stable server release
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 %h/.local/lib/agentes-update/update.py --directory %h/docker/agentes
+TimeoutStartSec=45min
+UMask=0077
