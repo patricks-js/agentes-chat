@@ -125,6 +125,11 @@ export const agentRuns = pgTable(
      * prompt caches stay valid). See docs/adr/0015-tool-gateway-and-approvals.md.
      */
     transcript: jsonb().$type<Record<string, unknown>>(),
+    /**
+     * Each claim's stage profile (the last `RUN_PROFILES_KEPT`), for the operator's work analytics. Its own column so
+     * analytics read it without decompressing the transcript; null on runs that ended before it existed.
+     */
+    profiles: jsonb().$type<unknown[]>(),
     /** Model calls made so far (capped by AGENT_MAX_TOOL_TURNS). */
     turns: integer().notNull().default(0),
     /**
@@ -133,6 +138,11 @@ export const agentRuns = pgTable(
      * next call ("New message from …"), instead of starting a second run.
      */
     pendingMessageIds: uuid().array().notNull().default(sql`'{}'::uuid[]`),
+    /**
+     * A separate request sent while the run worked (ADR 0112 addendum, `steerHandling` `queue`): out of what its steps
+     * read, left for after its task. Every ending hands them on with its unread messages: a run of their own.
+     */
+    afterMessageIds: uuid().array().notNull().default(sql`'{}'::uuid[]`),
     /**
      * The issue this run works on: set when someone asks the agent to
      * implement it, or when the run uses an issue tool on it. The issue shows
@@ -157,7 +167,7 @@ export const agentRuns = pgTable(
     workingSince: timestamp({ withTimezone: true }),
     /**
      * The computer this run waits for (`waiting_input` with a computer brain
-     * and nothing to fall back on, ADR 0032 §5): queued again when it comes
+     * that can't answer now, ADR 0032 §5): queued again when it comes
      * back (`resumeRunsWaitingForMachine`). Null otherwise.
      */
     waitingMachineId: uuid(),
@@ -176,7 +186,7 @@ export const agentRuns = pgTable(
     background: boolean().notNull().default(false),
     /**
      * The brain this run actually thinks with (`model`, `claude_code`, `codex`): the agent's, a
-     * mission's override or a fallback. Null until its first turn. Shared code reads this, never
+     * mission's override, or the model brain an older release stood in with. Null until its first turn. Shared code reads this, never
      * the agent's stored brain.
      */
     brain: text(),
@@ -346,7 +356,8 @@ export const agentRunSteps = pgTable(
   ],
 );
 
-export const usageKindEnum = pgEnum("usage_kind", ["agent", "router", "embedding", "summary"]);
+/** `image`: pictures made through the gateway (ADR 0197), billed like an agent's own calls when an agent asked. */
+export const usageKindEnum = pgEnum("usage_kind", ["agent", "router", "embedding", "summary", "image"]);
 
 /**
  * One row per model call, written by the Model Gateway only. Same numbers in
@@ -547,6 +558,11 @@ export interface ApprovalApprovers {
   requesterDecides: boolean;
   /** Only `userIds` decide it, admins too: someone else asked to act in that person's own mailbox. */
   required?: boolean;
+  /**
+   * An action in one person's own connection: listed only to `userIds` and to who is in its conversation, never to
+   * admins or the agent's owner for being them (ADR 0099 addendum).
+   */
+  personal?: boolean;
 }
 
 /**
@@ -967,6 +983,17 @@ export const agentConsultations = pgTable(
     reportedAt: timestamp({ withTimezone: true }),
     expiresAt: timestamp({ withTimezone: true }).notNull(),
     createdAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
+    /**
+     * The person behind the asking run when it was made (`runAuthorityById`), never changed; null with nobody behind
+     * it (a routine's work) and on rows made before the column.
+     */
+    forUserId: text(),
+    /**
+     * The asking run had read outside content when it made this (`runReadOutside`), never changed: its words relay
+     * that content. The question's own message carries the same mark for the agent that answers; a task's start line
+     * is the server's and carries none.
+     */
+    askerReadOutside: boolean().notNull().default(false),
   },
   (t) => [
     foreignKey({ columns: [t.orgId, t.askerAgentId], foreignColumns: [agents.orgId, agents.id] }).onDelete("cascade"),
@@ -978,6 +1005,8 @@ export const agentConsultations = pgTable(
     index().on(t.orgId, t.askerAgentId, t.createdAt),
     // The hand-over of a task, found by the task's conversation.
     index().on(t.orgId, t.channelId),
+    // What other agents handed an agent for a person, newest first (`handedFor`).
+    index("agent_consultations_handed_for_idx").on(t.orgId, t.targetAgentId, t.forUserId, t.createdAt),
   ],
 );
 
